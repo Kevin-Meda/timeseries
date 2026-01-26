@@ -1,0 +1,282 @@
+"""SARIMA forecasting model implementation."""
+
+import json
+import warnings
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+
+from forecast.models.base import BaseForecaster
+from forecast.utils import get_logger
+
+
+class SARIMAForecaster(BaseForecaster):
+    """SARIMA model for time series forecasting."""
+
+    def __init__(
+        self,
+        use_optuna: bool = False,
+        optuna_trials: int = 50,
+    ):
+        """Initialize SARIMA forecaster.
+
+        Args:
+            use_optuna: Whether to use Optuna for hyperparameter optimization.
+            optuna_trials: Number of Optuna trials if optimization is enabled.
+        """
+        super().__init__(name="SARIMA")
+        self.use_optuna = use_optuna
+        self.optuna_trials = optuna_trials
+        self.order = (1, 1, 1)
+        self.seasonal_order = (1, 1, 1, 12)
+        self.model = None
+        self.fitted_model = None
+        self._train_data = None
+
+    def fit(self, train: pd.Series, val: pd.Series | None = None) -> None:
+        """Fit SARIMA model to training data.
+
+        Args:
+            train: Training time series.
+            val: Optional validation time series for hyperparameter tuning.
+        """
+        logger = get_logger()
+        self._train_data = train
+
+        if self.use_optuna and val is not None:
+            self._optimize_with_optuna(train, val)
+        else:
+            self._grid_search(train, val)
+
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                self.model = SARIMAX(
+                    train,
+                    order=self.order,
+                    seasonal_order=self.seasonal_order,
+                    enforce_stationarity=False,
+                    enforce_invertibility=False,
+                )
+                self.fitted_model = self.model.fit(disp=False, maxiter=200)
+                self._is_fitted = True
+                logger.info(
+                    f"SARIMA fitted with order={self.order}, "
+                    f"seasonal_order={self.seasonal_order}"
+                )
+        except Exception as e:
+            logger.warning(f"SARIMA fitting failed: {e}. Using fallback parameters.")
+            self._fit_fallback(train)
+
+    def _grid_search(self, train: pd.Series, val: pd.Series | None) -> None:
+        """Perform grid search for optimal SARIMA parameters.
+
+        Args:
+            train: Training time series.
+            val: Validation time series.
+        """
+        logger = get_logger()
+        logger.debug("Starting SARIMA grid search")
+
+        p_values = [0, 1, 2]
+        d_values = [0, 1]
+        q_values = [0, 1, 2]
+        P_values = [0, 1]
+        D_values = [0, 1]
+        Q_values = [0, 1]
+
+        best_aic = np.inf
+        best_order = self.order
+        best_seasonal = self.seasonal_order
+
+        eval_data = val if val is not None else train.iloc[-12:]
+        fit_data = train if val is not None else train.iloc[:-12]
+
+        for p in p_values:
+            for d in d_values:
+                for q in q_values:
+                    for P in P_values:
+                        for D in D_values:
+                            for Q in Q_values:
+                                try:
+                                    with warnings.catch_warnings():
+                                        warnings.simplefilter("ignore")
+                                        model = SARIMAX(
+                                            fit_data,
+                                            order=(p, d, q),
+                                            seasonal_order=(P, D, Q, 12),
+                                            enforce_stationarity=False,
+                                            enforce_invertibility=False,
+                                        )
+                                        fitted = model.fit(disp=False, maxiter=100)
+                                        if fitted.aic < best_aic:
+                                            best_aic = fitted.aic
+                                            best_order = (p, d, q)
+                                            best_seasonal = (P, D, Q, 12)
+                                except Exception:
+                                    continue
+
+        self.order = best_order
+        self.seasonal_order = best_seasonal
+        logger.debug(f"Grid search complete: order={best_order}, seasonal={best_seasonal}")
+
+    def _optimize_with_optuna(self, train: pd.Series, val: pd.Series) -> None:
+        """Optimize SARIMA parameters using Optuna.
+
+        Args:
+            train: Training time series.
+            val: Validation time series.
+        """
+        logger = get_logger()
+
+        try:
+            import optuna
+
+            optuna.logging.set_verbosity(optuna.logging.WARNING)
+        except ImportError:
+            logger.warning("Optuna not available, falling back to grid search")
+            self._grid_search(train, val)
+            return
+
+        def objective(trial):
+            p = trial.suggest_int("p", 0, 2)
+            d = trial.suggest_int("d", 0, 1)
+            q = trial.suggest_int("q", 0, 2)
+            P = trial.suggest_int("P", 0, 1)
+            D = trial.suggest_int("D", 0, 1)
+            Q = trial.suggest_int("Q", 0, 1)
+
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    model = SARIMAX(
+                        train,
+                        order=(p, d, q),
+                        seasonal_order=(P, D, Q, 12),
+                        enforce_stationarity=False,
+                        enforce_invertibility=False,
+                    )
+                    fitted = model.fit(disp=False, maxiter=100)
+
+                    forecast = fitted.forecast(len(val))
+                    mape = np.mean(np.abs((val.values - forecast.values) / (val.values + 1e-8)))
+                    return mape
+            except Exception:
+                return float("inf")
+
+        study = optuna.create_study(direction="minimize")
+        study.optimize(objective, n_trials=self.optuna_trials, show_progress_bar=False)
+
+        best = study.best_params
+        self.order = (best["p"], best["d"], best["q"])
+        self.seasonal_order = (best["P"], best["D"], best["Q"], 12)
+        logger.info(f"Optuna optimization complete: order={self.order}, seasonal={self.seasonal_order}")
+
+    def _fit_fallback(self, train: pd.Series) -> None:
+        """Fit with conservative fallback parameters.
+
+        Args:
+            train: Training time series.
+        """
+        logger = get_logger()
+        fallback_orders = [
+            ((1, 0, 0), (0, 0, 0, 12)),
+            ((0, 1, 1), (0, 0, 0, 12)),
+            ((1, 1, 0), (0, 0, 0, 12)),
+        ]
+
+        for order, seasonal in fallback_orders:
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    self.model = SARIMAX(
+                        train,
+                        order=order,
+                        seasonal_order=seasonal,
+                        enforce_stationarity=False,
+                        enforce_invertibility=False,
+                    )
+                    self.fitted_model = self.model.fit(disp=False, maxiter=200)
+                    self.order = order
+                    self.seasonal_order = seasonal
+                    self._is_fitted = True
+                    logger.info(f"SARIMA fallback successful with order={order}")
+                    return
+            except Exception:
+                continue
+
+        logger.error("All SARIMA fallback attempts failed")
+        self._is_fitted = False
+
+    def predict(self, horizon: int) -> pd.Series:
+        """Generate forecasts.
+
+        Args:
+            horizon: Number of periods to forecast.
+
+        Returns:
+            Forecasted values.
+        """
+        if not self._is_fitted or self.fitted_model is None:
+            raise RuntimeError("Model must be fitted before prediction")
+
+        forecast = self.fitted_model.forecast(horizon)
+
+        if self._train_data is not None and hasattr(self._train_data.index, "freq"):
+            freq = self._train_data.index.freq or pd.infer_freq(self._train_data.index)
+            if freq:
+                last_date = self._train_data.index[-1]
+                future_index = pd.date_range(
+                    start=last_date + pd.DateOffset(months=1),
+                    periods=horizon,
+                    freq="MS",
+                )
+                forecast.index = future_index
+
+        return forecast
+
+    def get_params(self) -> dict:
+        """Get model parameters for serialization.
+
+        Returns:
+            Dictionary of model parameters.
+        """
+        return {
+            "order": self.order,
+            "seasonal_order": self.seasonal_order,
+            "use_optuna": self.use_optuna,
+            "optuna_trials": self.optuna_trials,
+        }
+
+    def load_params(self, params: dict) -> None:
+        """Load model parameters.
+
+        Args:
+            params: Dictionary of model parameters.
+        """
+        self.order = tuple(params.get("order", self.order))
+        self.seasonal_order = tuple(params.get("seasonal_order", self.seasonal_order))
+        self.use_optuna = params.get("use_optuna", self.use_optuna)
+        self.optuna_trials = params.get("optuna_trials", self.optuna_trials)
+
+    def save_params(self, path: str) -> None:
+        """Save model parameters to JSON file.
+
+        Args:
+            path: Path to save parameters.
+        """
+        params = self.get_params()
+        with open(path, "w") as f:
+            json.dump(params, f, indent=2)
+
+    def load_params_from_file(self, path: str) -> None:
+        """Load model parameters from JSON file.
+
+        Args:
+            path: Path to parameter file.
+        """
+        with open(path, "r") as f:
+            params = json.load(f)
+        self.load_params(params)

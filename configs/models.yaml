@@ -1,0 +1,8 @@
+sarima:
+  enabled: true
+  use_optuna: false
+  optuna_trials: 50
+chronos:
+  enabled: true
+holt_winters:
+  enabled: false

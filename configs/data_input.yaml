@@ -1,0 +1,4 @@
+excel_path: "data/input/demand.xlsx"
+date_format: "%m.%Y"
+product_column: "A"
+first_data_column: "B"
