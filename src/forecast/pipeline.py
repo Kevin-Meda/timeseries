@@ -1,6 +1,7 @@
 """Main pipeline orchestrator for the forecasting platform."""
 
 import json
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -21,15 +22,13 @@ from forecast.plotting.evaluation_plots import plot_all_evaluations
 from forecast.plotting.forecast_plots import plot_all_forecasts
 
 
+def get_timestamp() -> str:
+    """Get current timestamp for output filenames."""
+    return datetime.now().strftime("%Y%m%d_%H%M")
+
+
 def load_config(config_dir: str) -> dict:
-    """Load all configuration files from directory.
-
-    Args:
-        config_dir: Path to configuration directory.
-
-    Returns:
-        Combined configuration dictionary.
-    """
+    """Load all configuration files from directory."""
     config_path = Path(config_dir)
     config = {}
 
@@ -59,19 +58,13 @@ def run_pipeline(
     output_dir_override: str | None = None,
     log_level: str = "INFO",
 ) -> dict:
-    """Run the complete forecasting pipeline.
-
-    Args:
-        config_dir: Path to configuration directory.
-        input_override: Optional override for input Excel path.
-        output_dir_override: Optional override for output directory.
-        log_level: Logging level.
-
-    Returns:
-        Dictionary containing all results.
-    """
+    """Run the complete forecasting pipeline."""
     logger = setup_logger(level=log_level)
     logger.info("Starting forecasting pipeline")
+
+    # Get timestamp for this run
+    timestamp = get_timestamp()
+    logger.info(f"Run timestamp: {timestamp}")
 
     config = load_config(config_dir)
     logger.info(f"Loaded configuration from: {config_dir}")
@@ -84,9 +77,14 @@ def run_pipeline(
     output_config = config.get("output", {})
 
     excel_path = input_override or data_config.get("excel_path", "data/input/demand.xlsx")
-    results_dir = output_dir_override or output_config.get("results_dir", "output/results")
-    models_dir = output_config.get("models_dir", "output/models")
-    plots_dir = output_config.get("plots_dir", "output/plots")
+    base_results_dir = output_dir_override or output_config.get("results_dir", "output/results")
+    base_models_dir = output_config.get("models_dir", "output/models")
+    base_plots_dir = output_config.get("plots_dir", "output/plots")
+
+    # Add timestamp to output directories
+    results_dir = f"{base_results_dir}/{timestamp}"
+    models_dir = f"{base_models_dir}/{timestamp}"
+    plots_dir = f"{base_plots_dir}/{timestamp}"
 
     Path(results_dir).mkdir(parents=True, exist_ok=True)
     Path(models_dir).mkdir(parents=True, exist_ok=True)
@@ -106,11 +104,12 @@ def run_pipeline(
     forecastable, non_forecastable = classify_all_series(raw_data, lookback, min_pct)
     logger.info(f"Classified {len(forecastable)} forecastable series")
 
+    if non_forecastable:
+        logger.info(f"Skipped {len(non_forecastable)} non-forecastable series: {list(non_forecastable.keys())}")
+
     if not forecastable:
         logger.warning("No forecastable series found")
         return {"error": "No forecastable series found"}
-
-    cleaned_data, change_logs = preprocess_all_series(forecastable, preprocess_config)
 
     val_months = pipeline_config.get("validation_months", 12)
     test_months = pipeline_config.get("test_months", 12)
@@ -118,13 +117,24 @@ def run_pipeline(
     horizon = pipeline_config.get("forecast_horizon", 12)
     mape_threshold = pipeline_config.get("ensemble_mape_threshold", 0.5)
 
+    # Window the data first to use only recent months
+    windowed_data = {}
+    for name, series in forecastable.items():
+        if len(series) > window_months:
+            windowed_data[name] = series.iloc[-window_months:]
+        else:
+            windowed_data[name] = series
+
+    # Clean the windowed data
+    cleaned_data, change_logs = preprocess_all_series(windowed_data, preprocess_config)
+
     splits_dict = {}
     for name, series in cleaned_data.items():
         splits_dict[name] = split_series(series, val_months, test_months, window_months)
 
     if plots_config.get("save_preprocessing", True):
         plot_all_preprocessing(
-            original_dict=forecastable,
+            original_dict=windowed_data,
             cleaned_dict=cleaned_data,
             change_logs=change_logs,
             splits_dict=splits_dict,
@@ -150,7 +160,7 @@ def run_pipeline(
             else:
                 logger.warning("Chronos enabled but dependencies not available")
 
-        if models_config.get("holt_winters", {}).get("enabled", False):
+        if models_config.get("holt_winters", {}).get("enabled", True):
             models.append(HoltWintersForecaster())
 
         return models
@@ -266,7 +276,12 @@ def run_pipeline(
             dpi=plots_config.get("figure_dpi", 150),
         )
 
-    write_model_results(all_results, f"{results_dir}/model_results.xlsx")
+    write_model_results(
+        all_results,
+        all_test_actuals,
+        all_test_predictions,
+        f"{results_dir}/model_results.xlsx"
+    )
 
     write_ensemble_results(ensemble_results, f"{results_dir}/ensemble_forecasts.xlsx")
 
@@ -280,4 +295,5 @@ def run_pipeline(
         "ensemble_results": ensemble_results,
         "forecasts": all_forecasts,
         "categories_processed": len(all_results),
+        "timestamp": timestamp,
     }

@@ -60,7 +60,7 @@ class HoltWintersForecaster(BaseForecaster):
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 self.model = ExponentialSmoothing(
-                    train,
+                    train.values,
                     trend=self.trend,
                     seasonal=self.seasonal,
                     seasonal_periods=self.seasonal_periods if self.seasonal else None,
@@ -93,7 +93,7 @@ class HoltWintersForecaster(BaseForecaster):
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
                     self.model = ExponentialSmoothing(
-                        train,
+                        train.values,
                         trend=config["trend"],
                         seasonal=config["seasonal"],
                     )
@@ -116,13 +116,17 @@ class HoltWintersForecaster(BaseForecaster):
             horizon: Number of periods to forecast.
 
         Returns:
-            Forecasted values.
+            Forecasted values with proper DatetimeIndex.
         """
         if not self._is_fitted or self.fitted_model is None:
             raise RuntimeError("Model must be fitted before prediction")
 
         forecast = self.fitted_model.forecast(horizon)
 
+        # Convert to numpy array if needed
+        forecast_values = forecast.values if hasattr(forecast, "values") else forecast
+
+        # Create proper date index from training data
         if self._train_data is not None:
             last_date = self._train_data.index[-1]
             future_index = pd.date_range(
@@ -130,9 +134,9 @@ class HoltWintersForecaster(BaseForecaster):
                 periods=horizon,
                 freq="MS",
             )
-            forecast.index = future_index
+            return pd.Series(forecast_values, index=future_index, name="HoltWinters_forecast")
 
-        return forecast
+        return pd.Series(forecast_values, name="HoltWinters_forecast")
 
     def get_params(self) -> dict:
         """Get model parameters for serialization.

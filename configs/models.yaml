@@ -5,4 +5,4 @@ sarima:
 chronos:
   enabled: true
 holt_winters:
-  enabled: false
+  enabled: true

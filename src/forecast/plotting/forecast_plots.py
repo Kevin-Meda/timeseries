@@ -34,7 +34,9 @@ def plot_forecast(
 
     fig, ax = plt.subplots(figsize=(14, 6))
 
-    ax.plot(history.index, history.values, "k-", label="History", linewidth=2, alpha=0.8)
+    # Use recent history (last 36 months) for cleaner plot
+    recent_history = history.iloc[-36:] if len(history) > 36 else history
+    ax.plot(recent_history.index, recent_history.values, "k-", label="History", linewidth=2, alpha=0.8)
 
     colors = plt.cm.Set2(range(len(forecasts)))
 
@@ -53,11 +55,10 @@ def plot_forecast(
             color="red", alpha=0.1, label="Ensemble ±10%"
         )
 
-    if len(history) > 0 and len(forecasts) > 0:
-        first_forecast = list(forecasts.values())[0]
-        if len(first_forecast) > 0:
-            transition_x = history.index[-1]
-            ax.axvline(x=transition_x, color="gray", linestyle=":", alpha=0.5)
+    # Add vertical line at forecast start
+    if len(recent_history) > 0 and len(forecasts) > 0:
+        transition_x = recent_history.index[-1]
+        ax.axvline(x=transition_x, color="gray", linestyle=":", alpha=0.5)
 
     ax.set_xlabel("Date")
     ax.set_ylabel("Value")
@@ -66,7 +67,7 @@ def plot_forecast(
     ax.grid(True, alpha=0.3)
 
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
-    ax.xaxis.set_major_locator(mdates.MonthLocator(interval=6))
+    ax.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
     plt.xticks(rotation=45)
 
     plt.tight_layout()

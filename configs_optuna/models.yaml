@@ -1,0 +1,11 @@
+# Model configuration with Optuna optimization
+sarima:
+  enabled: true
+  use_optuna: true
+  optuna_trials: 20  # Fewer trials for testing
+
+chronos:
+  enabled: true
+
+holt_winters:
+  enabled: true

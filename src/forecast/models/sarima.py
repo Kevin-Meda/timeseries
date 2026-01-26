@@ -54,7 +54,7 @@ class SARIMAForecaster(BaseForecaster):
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 self.model = SARIMAX(
-                    train,
+                    train.values,
                     order=self.order,
                     seasonal_order=self.seasonal_order,
                     enforce_stationarity=False,
@@ -104,7 +104,7 @@ class SARIMAForecaster(BaseForecaster):
                                     with warnings.catch_warnings():
                                         warnings.simplefilter("ignore")
                                         model = SARIMAX(
-                                            fit_data,
+                                            fit_data.values,
                                             order=(p, d, q),
                                             seasonal_order=(P, D, Q, 12),
                                             enforce_stationarity=False,
@@ -152,7 +152,7 @@ class SARIMAForecaster(BaseForecaster):
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
                     model = SARIMAX(
-                        train,
+                        train.values,
                         order=(p, d, q),
                         seasonal_order=(P, D, Q, 12),
                         enforce_stationarity=False,
@@ -161,7 +161,7 @@ class SARIMAForecaster(BaseForecaster):
                     fitted = model.fit(disp=False, maxiter=100)
 
                     forecast = fitted.forecast(len(val))
-                    mape = np.mean(np.abs((val.values - forecast.values) / (val.values + 1e-8)))
+                    mape = np.mean(np.abs((val.values - forecast) / (val.values + 1e-8)))
                     return mape
             except Exception:
                 return float("inf")
@@ -192,7 +192,7 @@ class SARIMAForecaster(BaseForecaster):
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
                     self.model = SARIMAX(
-                        train,
+                        train.values,
                         order=order,
                         seasonal_order=seasonal,
                         enforce_stationarity=False,
@@ -217,25 +217,27 @@ class SARIMAForecaster(BaseForecaster):
             horizon: Number of periods to forecast.
 
         Returns:
-            Forecasted values.
+            Forecasted values with proper DatetimeIndex.
         """
         if not self._is_fitted or self.fitted_model is None:
             raise RuntimeError("Model must be fitted before prediction")
 
         forecast = self.fitted_model.forecast(horizon)
 
-        if self._train_data is not None and hasattr(self._train_data.index, "freq"):
-            freq = self._train_data.index.freq or pd.infer_freq(self._train_data.index)
-            if freq:
-                last_date = self._train_data.index[-1]
-                future_index = pd.date_range(
-                    start=last_date + pd.DateOffset(months=1),
-                    periods=horizon,
-                    freq="MS",
-                )
-                forecast.index = future_index
+        # Convert to numpy array if needed
+        forecast_values = forecast.values if hasattr(forecast, "values") else forecast
 
-        return forecast
+        # Create proper date index from training data
+        if self._train_data is not None:
+            last_date = self._train_data.index[-1]
+            future_index = pd.date_range(
+                start=last_date + pd.DateOffset(months=1),
+                periods=horizon,
+                freq="MS",
+            )
+            return pd.Series(forecast_values, index=future_index, name="SARIMA_forecast")
+
+        return pd.Series(forecast_values, name="SARIMA_forecast")
 
     def get_params(self) -> dict:
         """Get model parameters for serialization.

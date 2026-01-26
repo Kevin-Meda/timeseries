@@ -27,7 +27,8 @@ def load_excel(path: str, config: dict) -> dict[str, pd.Series]:
     if not file_path.exists():
         raise FileNotFoundError(f"Excel file not found: {path}")
 
-    df = pd.read_excel(path, header=None)
+    # Read all data as strings first, then convert
+    df = pd.read_excel(path, header=None, dtype=str)
     logger.debug(f"Loaded DataFrame with shape: {df.shape}")
 
     date_format = config.get("date_format", "%m.%Y")

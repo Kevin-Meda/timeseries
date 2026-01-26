@@ -1,7 +1,6 @@
-"""Chronos2 forecasting model wrapper."""
+"""Chronos forecasting model wrapper."""
 
 import json
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -25,7 +24,7 @@ def is_chronos_available() -> bool:
 
 
 class ChronosForecaster(BaseForecaster):
-    """Chronos2 model wrapper for time series forecasting."""
+    """Chronos model wrapper for time series forecasting."""
 
     def __init__(self, model_name: str = "amazon/chronos-t5-small"):
         """Initialize Chronos forecaster.
@@ -37,15 +36,14 @@ class ChronosForecaster(BaseForecaster):
         self.model_name = model_name
         self.pipeline = None
         self._train_data = None
+        self._context_length = None
 
     def fit(self, train: pd.Series, val: pd.Series | None = None) -> None:
         """Initialize Chronos pipeline with training data.
 
-        Chronos is a zero-shot model, so fitting just stores the context.
-
         Args:
             train: Training time series (used as context).
-            val: Validation time series (not used for Chronos).
+            val: Validation time series (appended to context if provided).
         """
         logger = get_logger()
 
@@ -57,17 +55,26 @@ class ChronosForecaster(BaseForecaster):
             self._is_fitted = False
             return
 
-        self._train_data = train
+        # Combine train and val for context
+        if val is not None and len(val) > 0:
+            self._train_data = pd.concat([train, val])
+        else:
+            self._train_data = train
+
+        self._context_length = len(self._train_data)
 
         try:
             device = "cuda" if torch.cuda.is_available() else "cpu"
             self.pipeline = ChronosPipeline.from_pretrained(
                 self.model_name,
                 device_map=device,
-                torch_dtype=torch.float32,
+                dtype=torch.float32,
             )
             self._is_fitted = True
-            logger.info(f"Chronos pipeline initialized with model: {self.model_name}")
+            logger.info(
+                f"Chronos initialized: model={self.model_name}, "
+                f"context_length={self._context_length}, device={device}"
+            )
         except Exception as e:
             logger.error(f"Failed to initialize Chronos: {e}")
             self._is_fitted = False
@@ -76,10 +83,10 @@ class ChronosForecaster(BaseForecaster):
         """Generate forecasts using Chronos.
 
         Args:
-            horizon: Number of periods to forecast.
+            horizon: Number of periods to forecast (prediction_length).
 
         Returns:
-            Forecasted values.
+            Forecasted values with proper DatetimeIndex.
         """
         logger = get_logger()
 
@@ -90,15 +97,21 @@ class ChronosForecaster(BaseForecaster):
             raise RuntimeError("No training data available for context")
 
         try:
-            context = torch.tensor(self._train_data.values, dtype=torch.float32)
+            inputs = torch.tensor(self._train_data.values, dtype=torch.float32)
+            logger.debug(
+                f"Chronos predict: context_length={len(inputs)}, "
+                f"prediction_length={horizon}"
+            )
+
             forecast = self.pipeline.predict(
-                context=context.unsqueeze(0),
+                inputs=inputs.unsqueeze(0),
                 prediction_length=horizon,
                 num_samples=20,
             )
 
             median_forecast = np.median(forecast[0].numpy(), axis=0)
 
+            # Create proper date index
             last_date = self._train_data.index[-1]
             future_index = pd.date_range(
                 start=last_date + pd.DateOffset(months=1),
@@ -113,39 +126,25 @@ class ChronosForecaster(BaseForecaster):
             raise
 
     def get_params(self) -> dict:
-        """Get model parameters for serialization.
-
-        Returns:
-            Dictionary of model parameters.
-        """
+        """Get model parameters for serialization."""
         return {
             "model_name": self.model_name,
+            "context_length": self._context_length,
         }
 
     def load_params(self, params: dict) -> None:
-        """Load model parameters.
-
-        Args:
-            params: Dictionary of model parameters.
-        """
+        """Load model parameters."""
         self.model_name = params.get("model_name", self.model_name)
+        self._context_length = params.get("context_length", self._context_length)
 
     def save_params(self, path: str) -> None:
-        """Save model parameters to JSON file.
-
-        Args:
-            path: Path to save parameters.
-        """
+        """Save model parameters to JSON file."""
         params = self.get_params()
         with open(path, "w") as f:
             json.dump(params, f, indent=2)
 
     def load_params_from_file(self, path: str) -> None:
-        """Load model parameters from JSON file.
-
-        Args:
-            path: Path to parameter file.
-        """
+        """Load model parameters from JSON file."""
         with open(path, "r") as f:
             params = json.load(f)
         self.load_params(params)

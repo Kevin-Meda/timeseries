@@ -1,0 +1,15 @@
+{
+  "order": [
+    1,
+    1,
+    2
+  ],
+  "seasonal_order": [
+    0,
+    0,
+    1,
+    12
+  ],
+  "use_optuna": false,
+  "optuna_trials": 50
+}
