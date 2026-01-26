@@ -1,4 +1,4 @@
-"""Chronos forecasting model wrapper."""
+"""Chronos-2 forecasting model wrapper."""
 
 import json
 
@@ -10,8 +10,7 @@ from forecast.utils import get_logger
 
 CHRONOS_AVAILABLE = False
 try:
-    import torch
-    from chronos import ChronosPipeline
+    from chronos import Chronos2Pipeline
 
     CHRONOS_AVAILABLE = True
 except ImportError:
@@ -24,13 +23,13 @@ def is_chronos_available() -> bool:
 
 
 class ChronosForecaster(BaseForecaster):
-    """Chronos model wrapper for time series forecasting."""
+    """Chronos-2 model wrapper for time series forecasting."""
 
-    def __init__(self, model_name: str = "amazon/chronos-t5-small"):
-        """Initialize Chronos forecaster.
+    def __init__(self, model_name: str = "amazon/chronos-2"):
+        """Initialize Chronos-2 forecaster.
 
         Args:
-            model_name: Hugging Face model name for Chronos.
+            model_name: Hugging Face model name for Chronos-2.
         """
         super().__init__(name="Chronos")
         self.model_name = model_name
@@ -39,7 +38,7 @@ class ChronosForecaster(BaseForecaster):
         self._context_length = None
 
     def fit(self, train: pd.Series, val: pd.Series | None = None) -> None:
-        """Initialize Chronos pipeline with training data.
+        """Initialize Chronos-2 pipeline with training data.
 
         Args:
             train: Training time series (used as context).
@@ -64,23 +63,25 @@ class ChronosForecaster(BaseForecaster):
         self._context_length = len(self._train_data)
 
         try:
+            import torch
+
             device = "cuda" if torch.cuda.is_available() else "cpu"
-            self.pipeline = ChronosPipeline.from_pretrained(
+            self.pipeline = Chronos2Pipeline.from_pretrained(
                 self.model_name,
                 device_map=device,
                 dtype=torch.float32,
             )
             self._is_fitted = True
             logger.info(
-                f"Chronos initialized: model={self.model_name}, "
-                f"context_length={self._context_length}, device={device}"
+                f"Chronos-2 initialized: model={self.model_name}, "
+                f"context_length={self._context_length}"
             )
         except Exception as e:
-            logger.error(f"Failed to initialize Chronos: {e}")
+            logger.error(f"Failed to initialize Chronos-2: {e}")
             self._is_fitted = False
 
     def predict(self, horizon: int) -> pd.Series:
-        """Generate forecasts using Chronos.
+        """Generate forecasts using Chronos-2.
 
         Args:
             horizon: Number of periods to forecast (prediction_length).
@@ -97,19 +98,24 @@ class ChronosForecaster(BaseForecaster):
             raise RuntimeError("No training data available for context")
 
         try:
-            inputs = torch.tensor(self._train_data.values, dtype=torch.float32)
+            import torch
+
+            context = torch.tensor(self._train_data.values, dtype=torch.float32)
             logger.debug(
-                f"Chronos predict: context_length={len(inputs)}, "
+                f"Chronos-2 predict: context_length={len(context)}, "
                 f"prediction_length={horizon}"
             )
 
-            forecast = self.pipeline.predict(
-                inputs=inputs.unsqueeze(0),
+            # Chronos-2 API: use predict_quantiles to get median forecast
+            median_forecasts, _ = self.pipeline.predict_quantiles(
+                inputs=[context],
                 prediction_length=horizon,
-                num_samples=20,
+                quantile_levels=[0.5],
             )
 
-            median_forecast = np.median(forecast[0].numpy(), axis=0)
+            # median_forecasts is a list of tensors, one per input
+            # Each tensor has shape (num_quantiles, prediction_length)
+            median_forecast = median_forecasts[0][0].numpy().flatten()
 
             # Create proper date index
             last_date = self._train_data.index[-1]
@@ -122,7 +128,7 @@ class ChronosForecaster(BaseForecaster):
             return pd.Series(median_forecast, index=future_index, name="Chronos_forecast")
 
         except Exception as e:
-            logger.error(f"Chronos prediction failed: {e}")
+            logger.error(f"Chronos-2 prediction failed: {e}")
             raise
 
     def get_params(self) -> dict:
