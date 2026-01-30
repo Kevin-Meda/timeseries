@@ -23,7 +23,11 @@ def is_chronos_available() -> bool:
 
 
 class ChronosForecaster(BaseForecaster):
-    """Chronos-2 model wrapper for time series forecasting."""
+    """Chronos-2 model wrapper for time series forecasting.
+
+    Supports multi-product mode for batch forecasting.
+    Exogenous features are ignored (Chronos uses only univariate context).
+    """
 
     def __init__(self, model_name: str = "amazon/chronos-2"):
         """Initialize Chronos-2 forecaster.
@@ -32,18 +36,33 @@ class ChronosForecaster(BaseForecaster):
             model_name: Hugging Face model name for Chronos-2.
         """
         super().__init__(name="Chronos")
+        self._supports_multivariate = False
+        self._supports_multi_product = True  # Can batch multiple products
         self.model_name = model_name
         self.pipeline = None
         self._train_data = None
         self._context_length = None
 
-    def fit(self, train: pd.Series, val: pd.Series | None = None) -> None:
+    def fit(
+        self,
+        train: pd.Series | pd.DataFrame,
+        val: pd.Series | pd.DataFrame | None = None,
+        exog_train: pd.DataFrame | None = None,
+        exog_val: pd.DataFrame | None = None,
+    ) -> None:
         """Initialize Chronos-2 pipeline with training data.
 
         Args:
-            train: Training time series (used as context).
+            train: Training time series (Series or DataFrame with 'demand' column).
             val: Validation time series (appended to context if provided).
+            exog_train: Ignored - Chronos uses only univariate context.
+            exog_val: Ignored - Chronos uses only univariate context.
         """
+        # Extract Series if DataFrame is provided
+        if isinstance(train, pd.DataFrame):
+            train = train["demand"] if "demand" in train.columns else train.iloc[:, 0]
+        if isinstance(val, pd.DataFrame):
+            val = val["demand"] if "demand" in val.columns else val.iloc[:, 0]
         logger = get_logger()
 
         if not CHRONOS_AVAILABLE:
@@ -80,11 +99,16 @@ class ChronosForecaster(BaseForecaster):
             logger.error(f"Failed to initialize Chronos-2: {e}")
             self._is_fitted = False
 
-    def predict(self, horizon: int) -> pd.Series:
+    def predict(
+        self,
+        horizon: int,
+        exog_future: pd.DataFrame | None = None,
+    ) -> pd.Series:
         """Generate forecasts using Chronos-2.
 
         Args:
             horizon: Number of periods to forecast (prediction_length).
+            exog_future: Ignored - Chronos uses only univariate context.
 
         Returns:
             Forecasted values with proper DatetimeIndex.

@@ -1,7 +1,0 @@
-# Preprocessing configuration
-classification:
-  lookback_months: 24
-  min_nonzero_pct: 0.5  # At least 50% non-zero in lookback
-
-data_window_months: 60
-outlier_std_threshold: 3.0

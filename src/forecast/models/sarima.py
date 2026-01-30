@@ -13,7 +13,10 @@ from forecast.utils import get_logger
 
 
 class SARIMAForecaster(BaseForecaster):
-    """SARIMA model for time series forecasting."""
+    """SARIMA model for time series forecasting.
+
+    This is a univariate model - exogenous features are ignored.
+    """
 
     def __init__(
         self,
@@ -27,6 +30,8 @@ class SARIMAForecaster(BaseForecaster):
             optuna_trials: Number of Optuna trials if optimization is enabled.
         """
         super().__init__(name="SARIMA")
+        self._supports_multivariate = False
+        self._supports_multi_product = False
         self.use_optuna = use_optuna
         self.optuna_trials = optuna_trials
         self.order = (1, 1, 1)
@@ -35,13 +40,26 @@ class SARIMAForecaster(BaseForecaster):
         self.fitted_model = None
         self._train_data = None
 
-    def fit(self, train: pd.Series, val: pd.Series | None = None) -> None:
+    def fit(
+        self,
+        train: pd.Series | pd.DataFrame,
+        val: pd.Series | pd.DataFrame | None = None,
+        exog_train: pd.DataFrame | None = None,
+        exog_val: pd.DataFrame | None = None,
+    ) -> None:
         """Fit SARIMA model to training data.
 
         Args:
-            train: Training time series.
+            train: Training time series (Series or DataFrame with 'demand' column).
             val: Optional validation time series for hyperparameter tuning.
+            exog_train: Ignored - SARIMA is univariate.
+            exog_val: Ignored - SARIMA is univariate.
         """
+        # Extract Series if DataFrame is provided
+        if isinstance(train, pd.DataFrame):
+            train = train["demand"] if "demand" in train.columns else train.iloc[:, 0]
+        if isinstance(val, pd.DataFrame):
+            val = val["demand"] if "demand" in val.columns else val.iloc[:, 0]
         logger = get_logger()
         self._train_data = train
 
@@ -210,11 +228,16 @@ class SARIMAForecaster(BaseForecaster):
         logger.error("All SARIMA fallback attempts failed")
         self._is_fitted = False
 
-    def predict(self, horizon: int) -> pd.Series:
+    def predict(
+        self,
+        horizon: int,
+        exog_future: pd.DataFrame | None = None,
+    ) -> pd.Series:
         """Generate forecasts.
 
         Args:
             horizon: Number of periods to forecast.
+            exog_future: Ignored - SARIMA is univariate.
 
         Returns:
             Forecasted values with proper DatetimeIndex.

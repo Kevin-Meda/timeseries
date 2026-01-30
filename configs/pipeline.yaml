@@ -1,4 +1,14 @@
+# Data split settings
 validation_months: 12
 test_months: 12
 forecast_horizon: 12
+
+# Ensemble settings
 ensemble_mape_threshold: 0.5
+
+# Product mode: "per_product" (train separate model per product)
+#               "multi_product" (train single model across products)
+product_mode: "multi_product"
+
+# For multi_product mode: encode product ID as feature
+encode_product_id: true

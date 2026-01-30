@@ -12,6 +12,7 @@ def setup_logger(
     name: str = "forecast",
     level: str = "INFO",
     log_dir: str = "logs",
+    project_name: str | None = None,
 ) -> logging.Logger:
     """Set up and configure the logger with console and file handlers.
 
@@ -19,6 +20,8 @@ def setup_logger(
         name: Logger name.
         level: Logging level (DEBUG, INFO, WARNING, ERROR).
         log_dir: Directory for log files.
+        project_name: Optional project name for organizing logs.
+            If provided, logs go to logs/{project_name}/
 
     Returns:
         Configured logger instance.
@@ -41,7 +44,10 @@ def setup_logger(
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
 
+    # Build log path with optional project subdirectory
     log_path = Path(log_dir)
+    if project_name:
+        log_path = log_path / project_name
     log_path.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

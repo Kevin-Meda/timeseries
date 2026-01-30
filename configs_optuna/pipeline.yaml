@@ -1,4 +1,0 @@
-validation_months: 12
-test_months: 12
-forecast_horizon: 12
-ensemble_mape_threshold: 0.5

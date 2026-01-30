@@ -4,6 +4,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import pandas as pd
+import numpy as np
 
 from forecast.utils import get_logger
 
@@ -16,7 +17,7 @@ def plot_preprocessing(
     output_path: str,
     dpi: int = 150,
 ) -> None:
-    """Create preprocessing visualization plot."""
+    """Create preprocessing visualization plot with same y-axis scale for both panels."""
     logger = get_logger()
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
@@ -26,6 +27,26 @@ def plot_preprocessing(
     x_positions = range(len(original))
     dates = original.index
 
+    # Calculate y-limits from all data (original + anomaly values)
+    all_values = list(original.values)
+    original_values = change_log.get("original_values", {})
+    for idx, val in original_values.items():
+        if isinstance(val, (int, float)) and not np.isnan(val):
+            all_values.append(val)
+    all_values.extend(cleaned.values)
+
+    # Filter out NaN and compute limits
+    valid_values = [v for v in all_values if isinstance(v, (int, float)) and not np.isnan(v)]
+    if valid_values:
+        y_min = min(valid_values)
+        y_max = max(valid_values)
+        # Add padding
+        y_range = y_max - y_min
+        y_padding = y_range * 0.1 if y_range > 0 else 1
+        y_lim = (y_min - y_padding, y_max + y_padding)
+    else:
+        y_lim = None
+
     # Plot original data
     ax1 = axes[0]
     ax1.plot(x_positions, original.values, "b-", label="Original", alpha=0.7, linewidth=1.5)
@@ -34,7 +55,6 @@ def plot_preprocessing(
     neg_indices = change_log.get("negative_indices", [])
     nan_indices = change_log.get("nan_indices", [])
     outlier_indices = change_log.get("outlier_indices", [])
-    original_values = change_log.get("original_values", {})
 
     if neg_indices:
         neg_x = [i for i in neg_indices if i < len(original)]
@@ -54,6 +74,8 @@ def plot_preprocessing(
     ax1.set_title(f"Original Data - {original.name}")
     ax1.legend(loc="upper left")
     ax1.grid(True, alpha=0.3)
+    if y_lim:
+        ax1.set_ylim(y_lim)
 
     # Plot cleaned data
     ax2 = axes[1]
@@ -81,6 +103,8 @@ def plot_preprocessing(
     ax2.set_title(f"Cleaned Data with Splits - {cleaned.name}")
     ax2.legend(loc="upper left")
     ax2.grid(True, alpha=0.3)
+    if y_lim:
+        ax2.set_ylim(y_lim)
 
     # Set up x-axis ticks for both axes
     tick_interval = max(1, len(dates) // 10)  # Show ~10 ticks

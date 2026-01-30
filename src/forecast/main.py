@@ -17,10 +17,11 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  forecast                          Run with default configuration
-  forecast --config-dir ./myconfig  Use custom config directory
-  forecast --input data/sales.xlsx  Override input file
-  forecast --log-level DEBUG        Enable debug logging
+  forecast                              Run with default configuration
+  forecast --config-dir ./myconfig      Use custom config directory
+  forecast --input data/sales.xlsx      Override input file
+  forecast --log-level DEBUG            Enable debug logging
+  forecast --project-name my_project    Organize outputs under project name
 
 Configuration files should be placed in the config directory:
   - data_input.yaml: Input file settings
@@ -57,6 +58,13 @@ Configuration files should be placed in the config directory:
         help="Logging level (default: INFO)",
     )
 
+    parser.add_argument(
+        "--project-name",
+        dest="project_name",
+        default="default",
+        help="Project name for organizing outputs (default: default)",
+    )
+
     args = parser.parse_args()
 
     try:
@@ -65,6 +73,7 @@ Configuration files should be placed in the config directory:
             input_override=args.input_file,
             output_dir_override=args.output_dir,
             log_level=args.log_level,
+            project_name=args.project_name,
         )
 
         if "error" in results:

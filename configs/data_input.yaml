@@ -1,4 +1,13 @@
+# Primary demand data
 excel_path: "data/input/demand.xlsx"
 date_format: "%m.%Y"
 product_column: "A"
 first_data_column: "B"
+
+# Feature store (optional) - set to null to disable
+# Format: Excel with date index, product-prefixed columns (e.g., Product_A_price)
+feature_store_path: null
+
+# List of feature name prefixes that are categorical (for encoding)
+# Example: ["promo", "holiday", "weather_type"]
+categorical_features: []

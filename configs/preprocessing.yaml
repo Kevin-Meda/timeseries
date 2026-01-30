@@ -1,5 +1,15 @@
+# Series classification settings
 classification:
   lookback_months: 24
   min_nonzero_pct: 0.5
+
+# Data windowing
 data_window_months: 60
+
+# Outlier detection threshold (IQR multiplier)
 outlier_std_threshold: 3.0
+
+# Feature scaling (for multivariate models)
+scaler:
+  enabled: false
+  type: "robust"  # "robust" (uses median/IQR) or "minmax" (scales to [0,1])
