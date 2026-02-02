@@ -144,3 +144,115 @@ def get_univariate_models(models: list[BaseForecaster]) -> list[BaseForecaster]:
         List of univariate forecasters.
     """
     return [m for m in models if not m.supports_multivariate]
+
+
+def create_univariate_models(config: dict[str, Any]) -> list[BaseForecaster]:
+    """Create univariate forecaster instances (SARIMA, HoltWinters).
+
+    Args:
+        config: Models configuration dictionary.
+
+    Returns:
+        List of univariate forecaster instances.
+    """
+    logger = get_logger()
+    models: list[BaseForecaster] = []
+
+    # SARIMA
+    sarima_config = config.get("sarima", {})
+    if sarima_config.get("enabled", False):
+        optimize = sarima_config.get("optimize_params", True)
+        optuna_trials = sarima_config.get("optuna_trials", 5)
+        models.append(
+            SARIMAForecaster(
+                use_optuna=optimize,
+                optuna_trials=optuna_trials,
+            )
+        )
+        logger.debug(f"Created SARIMA forecaster (optuna={optimize}, trials={optuna_trials})")
+
+    # Holt-Winters
+    hw_config = config.get("holt_winters", {})
+    if hw_config.get("enabled", False):
+        defaults = hw_config.get("defaults", {})
+        trend = defaults.get("trend", "add")
+        seasonal = defaults.get("seasonal", "add")
+        seasonal_periods = defaults.get("seasonal_periods", 12)
+        models.append(
+            HoltWintersForecaster(
+                trend=trend,
+                seasonal=seasonal,
+                seasonal_periods=seasonal_periods,
+            )
+        )
+        logger.debug("Created Holt-Winters forecaster")
+
+    logger.info(f"Created {len(models)} univariate forecasters: {[m.name for m in models]}")
+    return models
+
+
+def create_multivariate_models(config: dict[str, Any]) -> list[BaseForecaster]:
+    """Create multivariate forecaster instances (Prophet, XGBoost, Chronos).
+
+    Args:
+        config: Models configuration dictionary.
+
+    Returns:
+        List of multivariate forecaster instances.
+    """
+    logger = get_logger()
+    models: list[BaseForecaster] = []
+
+    # Prophet
+    prophet_config = config.get("prophet", {})
+    if prophet_config.get("enabled", False):
+        if is_prophet_available():
+            optimize = prophet_config.get("optimize_params", True)
+            optuna_trials = prophet_config.get("optuna_trials", 5)
+            defaults = prophet_config.get("defaults", {})
+            models.append(
+                ProphetForecaster(
+                    use_optuna=optimize,
+                    optuna_trials=optuna_trials,
+                    changepoint_prior_scale=defaults.get("changepoint_prior_scale", 0.05),
+                    seasonality_prior_scale=defaults.get("seasonality_prior_scale", 10.0),
+                    seasonality_mode=defaults.get("seasonality_mode", "additive"),
+                )
+            )
+            logger.debug(f"Created Prophet forecaster (optuna={optimize}, trials={optuna_trials})")
+        else:
+            logger.warning("Prophet enabled but not available")
+
+    # XGBoost
+    xgb_config = config.get("xgboost", {})
+    if xgb_config.get("enabled", False):
+        if is_xgboost_available():
+            optimize = xgb_config.get("optimize_params", True)
+            optuna_trials = xgb_config.get("optuna_trials", 5)
+            defaults = xgb_config.get("defaults", {})
+            models.append(
+                XGBoostForecaster(
+                    use_optuna=optimize,
+                    optuna_trials=optuna_trials,
+                    n_estimators=defaults.get("n_estimators", 100),
+                    max_depth=defaults.get("max_depth", 6),
+                    learning_rate=defaults.get("learning_rate", 0.1),
+                )
+            )
+            logger.debug(f"Created XGBoost forecaster (optuna={optimize}, trials={optuna_trials})")
+        else:
+            logger.warning("XGBoost enabled but not available")
+
+    # Chronos
+    chronos_config = config.get("chronos", {})
+    if chronos_config.get("enabled", False):
+        if is_chronos_available():
+            defaults = chronos_config.get("defaults", {})
+            model_name = defaults.get("model_name", "amazon/chronos-2")
+            models.append(ChronosForecaster(model_name=model_name))
+            logger.debug("Created Chronos forecaster")
+        else:
+            logger.warning("Chronos enabled but dependencies not available")
+
+    logger.info(f"Created {len(models)} multivariate forecasters: {[m.name for m in models]}")
+    return models

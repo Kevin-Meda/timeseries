@@ -1,4 +1,4 @@
-"""Chronos-2 forecasting model wrapper."""
+"""Chronos-2 forecasting model wrapper with multivariate support."""
 
 import json
 
@@ -25,8 +25,8 @@ def is_chronos_available() -> bool:
 class ChronosForecaster(BaseForecaster):
     """Chronos-2 model wrapper for time series forecasting.
 
-    Supports multi-product mode for batch forecasting.
-    Exogenous features are ignored (Chronos uses only univariate context).
+    Supports multivariate forecasting with covariates (Chronos-2 feature).
+    Covariates are passed as past_covariates during prediction.
     """
 
     def __init__(self, model_name: str = "amazon/chronos-2"):
@@ -36,12 +36,13 @@ class ChronosForecaster(BaseForecaster):
             model_name: Hugging Face model name for Chronos-2.
         """
         super().__init__(name="Chronos")
-        self._supports_multivariate = False
+        self._supports_multivariate = True  # Chronos-2 supports covariates
         self._supports_multi_product = True  # Can batch multiple products
         self.model_name = model_name
         self.pipeline = None
         self._train_data = None
         self._context_length = None
+        self._covariates = None  # Store covariates for prediction
 
     def fit(
         self,
@@ -55,8 +56,8 @@ class ChronosForecaster(BaseForecaster):
         Args:
             train: Training time series (Series or DataFrame with 'demand' column).
             val: Validation time series (appended to context if provided).
-            exog_train: Ignored - Chronos uses only univariate context.
-            exog_val: Ignored - Chronos uses only univariate context.
+            exog_train: Training exogenous features (used as past_covariates).
+            exog_val: Validation exogenous features (appended if provided).
         """
         # Extract Series if DataFrame is provided
         if isinstance(train, pd.DataFrame):
@@ -79,6 +80,18 @@ class ChronosForecaster(BaseForecaster):
         else:
             self._train_data = train
 
+        # Combine covariates if provided
+        self._covariates = None
+        if exog_train is not None:
+            if exog_val is not None and len(exog_val) > 0:
+                self._covariates = pd.concat([exog_train, exog_val])
+            else:
+                self._covariates = exog_train
+            logger.debug(
+                f"Chronos-2 using {len(self._covariates.columns)} covariates: "
+                f"{list(self._covariates.columns)}"
+            )
+
         self._context_length = len(self._train_data)
 
         try:
@@ -93,7 +106,8 @@ class ChronosForecaster(BaseForecaster):
             self._is_fitted = True
             logger.info(
                 f"Chronos-2 initialized: model={self.model_name}, "
-                f"context_length={self._context_length}"
+                f"context_length={self._context_length}, "
+                f"covariates={self._covariates is not None}"
             )
         except Exception as e:
             logger.error(f"Failed to initialize Chronos-2: {e}")
@@ -108,7 +122,7 @@ class ChronosForecaster(BaseForecaster):
 
         Args:
             horizon: Number of periods to forecast (prediction_length).
-            exog_future: Ignored - Chronos uses only univariate context.
+            exog_future: Future exogenous features (used as known_covariates).
 
         Returns:
             Forecasted values with proper DatetimeIndex.
@@ -130,12 +144,52 @@ class ChronosForecaster(BaseForecaster):
                 f"prediction_length={horizon}"
             )
 
-            # Chronos-2 API: use predict_quantiles to get median forecast
-            median_forecasts, _ = self.pipeline.predict_quantiles(
-                inputs=[context],
-                prediction_length=horizon,
-                quantile_levels=[0.5],
-            )
+            # Prepare covariates if available
+            past_covariates = None
+            known_covariates = None
+
+            if self._covariates is not None:
+                # Past covariates: historical feature values
+                past_covariates = torch.tensor(
+                    self._covariates.values, dtype=torch.float32
+                )
+                logger.debug(f"Using past_covariates shape: {past_covariates.shape}")
+
+            if exog_future is not None:
+                # Known covariates: future feature values
+                known_covariates = torch.tensor(
+                    exog_future.values, dtype=torch.float32
+                )
+                logger.debug(f"Using known_covariates shape: {known_covariates.shape}")
+
+            # Chronos-2 API: use predict_quantiles with covariates
+            try:
+                if past_covariates is not None or known_covariates is not None:
+                    # Try multivariate prediction with covariates
+                    median_forecasts, _ = self.pipeline.predict_quantiles(
+                        inputs=[context],
+                        prediction_length=horizon,
+                        quantile_levels=[0.5],
+                        past_covariates=[past_covariates] if past_covariates is not None else None,
+                        known_covariates=[known_covariates] if known_covariates is not None else None,
+                    )
+                else:
+                    # Univariate prediction (no covariates)
+                    median_forecasts, _ = self.pipeline.predict_quantiles(
+                        inputs=[context],
+                        prediction_length=horizon,
+                        quantile_levels=[0.5],
+                    )
+            except TypeError as e:
+                # Fallback if covariates not supported by this Chronos version
+                logger.warning(
+                    f"Covariates not supported by Chronos version, falling back to univariate: {e}"
+                )
+                median_forecasts, _ = self.pipeline.predict_quantiles(
+                    inputs=[context],
+                    prediction_length=horizon,
+                    quantile_levels=[0.5],
+                )
 
             # median_forecasts is a list of tensors, one per input
             # Each tensor has shape (num_quantiles, prediction_length)
@@ -160,6 +214,8 @@ class ChronosForecaster(BaseForecaster):
         return {
             "model_name": self.model_name,
             "context_length": self._context_length,
+            "has_covariates": self._covariates is not None,
+            "n_covariates": len(self._covariates.columns) if self._covariates is not None else 0,
         }
 
     def load_params(self, params: dict) -> None:

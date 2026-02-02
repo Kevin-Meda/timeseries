@@ -18,7 +18,12 @@ from forecast.preprocessing.classifier import classify_all_series
 from forecast.preprocessing.cleaner import preprocess_all_series
 from forecast.models import create_models, get_available_models
 from forecast.models.base import BaseForecaster
-from forecast.evaluation import evaluate_all, create_ensemble
+from forecast.evaluation import (
+    evaluate_all,
+    create_ensemble,
+    compute_feature_importance,
+    write_project_feature_importance,
+)
 from forecast.output import (
     write_model_results,
     write_ensemble_results,
@@ -166,6 +171,7 @@ def run_pipeline(
     window_months = preprocess_config.get("data_window_months", 60)
     horizon = pipeline_config.get("forecast_horizon", 12)
     mape_threshold = pipeline_config.get("ensemble_mape_threshold", 0.5)
+    max_models = pipeline_config.get("ensemble_max_models")
 
     # Scaler settings
     scaler_config = preprocess_config.get("scaler", {})
@@ -264,6 +270,7 @@ def run_pipeline(
     ensemble_results: dict[str, dict] = {}
     products_json_data: dict[str, dict] = {}
     all_model_weights: dict[str, dict[str, float]] = {}  # Track weights for all models
+    all_feature_importances: dict[str, dict[str, dict]] = {}  # Track feature importances
 
     # Initialize param store
     param_store = ParamStore(pm)
@@ -314,6 +321,7 @@ def run_pipeline(
         category_test_predictions: dict[str, pd.Series] = {}
         category_forecasts: dict[str, pd.Series] = {}
         category_model_json: dict[str, dict] = {}
+        category_feature_importances: dict[str, dict] = {}
 
         # Train each model
         for model in models_list:
@@ -408,9 +416,36 @@ def run_pipeline(
                     params = model_instance.get_params()
                     param_store.save_params(model_name, category_name, params)
 
-                    # Build JSON result
+                    # Compute feature importance if configured and model supports it
                     feature_importance = None
-                    if hasattr(model_instance, "get_feature_importance"):
+                    model_config_key = model_name.lower().replace(" ", "_")
+                    fi_config = models_config.get(model_config_key, {}).get(
+                        "feature_importance", {}
+                    )
+
+                    if fi_config.get("enabled", False) and combined_exog is not None:
+                        # Use the model's internal model for importance computation
+                        inner_model = getattr(model_instance, "model", None)
+                        if inner_model is not None:
+                            # Prepare combined features for importance computation
+                            combined_target = pd.concat([train_target, val_target, test_target])
+                            fi_result = compute_feature_importance(
+                                inner_model,
+                                model_name,
+                                combined_exog,
+                                combined_target.iloc[:len(combined_exog)],
+                                fi_config,
+                            )
+                            if fi_result:
+                                category_feature_importances[model_name] = fi_result
+                                # Use SHAP or permutation for the JSON summary
+                                if "shap" in fi_result:
+                                    feature_importance = fi_result["shap"]
+                                elif "permutation" in fi_result:
+                                    feature_importance = fi_result["permutation"]
+
+                    # Fallback to model's built-in feature importance
+                    if feature_importance is None and hasattr(model_instance, "get_feature_importance"):
                         feature_importance = model_instance.get_feature_importance()
 
                     optuna_trials = params.get("optuna_trials_used", 0)
@@ -437,10 +472,14 @@ def run_pipeline(
                 category_name, category_model_json
             )
 
+            # Store feature importances for this category
+            if category_feature_importances:
+                all_feature_importances[category_name] = category_feature_importances
+
             # Create ensemble and track all model weights
             if len(category_forecasts) > 0:
                 ensemble, weights, models_used = create_ensemble(
-                    category_forecasts, category_results, mape_threshold
+                    category_forecasts, category_results, mape_threshold, max_models
                 )
 
                 # Build complete weights dict (including 0% for excluded models)
@@ -499,6 +538,15 @@ def run_pipeline(
     )
 
     write_ensemble_results(ensemble_results, str(results_dir / "ensemble_forecasts.xlsx"))
+
+    # Write feature importance if computed
+    if all_feature_importances:
+        write_project_feature_importance(
+            project_name=project_name,
+            all_importances=all_feature_importances,
+            output_dir=results_dir,
+            ensemble_weights=all_model_weights,
+        )
 
     # Write consolidated JSON summary
     write_run_summary(
@@ -571,9 +619,11 @@ def _create_fresh_model(template: BaseForecaster, config: dict) -> BaseForecaste
     elif template.name == "Chronos":
         chronos_config = config.get("chronos", {})
         defaults = chronos_config.get("defaults", {})
-        return ChronosForecaster(
-            model_name=defaults.get("model_name", "amazon/chronos-t5-small"),
-        )
+        # Use config model_name if specified, otherwise use class default
+        model_name = defaults.get("model_name")
+        if model_name:
+            return ChronosForecaster(model_name=model_name)
+        return ChronosForecaster()
 
     elif template.name == "XGBoost" and is_xgboost_available():
         xgb_config = config.get("xgboost", {})

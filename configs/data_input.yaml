@@ -6,8 +6,16 @@ first_data_column: "B"
 
 # Feature store (optional) - set to null to disable
 # Format: Excel with date index, product-prefixed columns (e.g., Product_A_price)
-feature_store_path: null
+feature_store_path: "data/input/features.xlsx"
+
+# Manual feature selection per product (optional)
+# If not specified, all available features from feature store are used
+# Example:
+#   selected_features:
+#     Product_A: ["price", "promo"]
+#     Product_B: ["price", "inventory"]
+selected_features: {}
 
 # List of feature name prefixes that are categorical (for encoding)
 # Example: ["promo", "holiday", "weather_type"]
-categorical_features: []
+categorical_features: ["promo"]

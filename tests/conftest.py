@@ -50,8 +50,8 @@ def feature_store_path(test_data_dir):
     """Create toy feature store and return its path."""
     feature_store_file = test_data_dir / "features.xlsx"
 
-    # Generate date range matching the demand data
-    dates = pd.date_range(start="2021-01-01", periods=48, freq="MS")
+    # Generate date range matching the demand data (aligned with four_product_demand_file)
+    dates = pd.date_range(start="2020-01-01", periods=60, freq="MS")
 
     np.random.seed(42)
 
@@ -344,6 +344,272 @@ def four_product_config(temp_config_dir, four_product_demand_file, four_product_
     config["forecast_horizon"] = 6
     config["ensemble_mape_threshold"] = 0.5
 
+    with open(pipeline_path, "w") as f:
+        yaml.dump(config, f)
+
+    return temp_config_dir
+
+
+# ============================================================================
+# End-to-End Test Fixtures
+# ============================================================================
+
+
+@pytest.fixture(scope="function")
+def e2e_univariate_demand_file(temp_output_dir):
+    """Create synthetic univariate demand data for E2E tests.
+
+    Creates Excel file with 2 products (no shared features) for testing
+    univariate models with param optimization.
+    """
+    np.random.seed(42)
+    dates = pd.date_range(start="2020-01-01", periods=60, freq="MS")
+
+    products_data = {}
+
+    # Product with trend
+    trend = np.linspace(100, 200, len(dates))
+    noise = np.random.randn(len(dates)) * 10
+    products_data["UniTrend"] = (trend + noise).clip(min=1)
+
+    # Product with seasonality
+    base = 150
+    seasonal = 40 * np.sin(2 * np.pi * np.arange(len(dates)) / 12)
+    noise = np.random.randn(len(dates)) * 8
+    products_data["UniSeasonal"] = (base + seasonal + noise).clip(min=1)
+
+    # Build DataFrame in loader.py expected format
+    date_strings = [d.strftime("%m.%Y") for d in dates]
+    data_rows = [[""] + date_strings]
+
+    for product_name, values in products_data.items():
+        row = [product_name] + list(values)
+        data_rows.append(row)
+
+    df = pd.DataFrame(data_rows)
+    demand_file = Path(temp_output_dir) / "e2e_univariate_demand.xlsx"
+    df.to_excel(demand_file, header=False, index=False)
+
+    return str(demand_file)
+
+
+@pytest.fixture
+def e2e_univariate_config(temp_config_dir, e2e_univariate_demand_file):
+    """Create config for E2E univariate test with param optimization."""
+    import yaml
+
+    # Update data_input.yaml
+    data_input_path = Path(temp_config_dir) / "data_input.yaml"
+    with open(data_input_path, "r") as f:
+        config = yaml.safe_load(f) or {}
+
+    config["excel_path"] = e2e_univariate_demand_file
+    config["feature_store_path"] = None
+    config["categorical_features"] = []
+
+    with open(data_input_path, "w") as f:
+        yaml.dump(config, f)
+
+    # Update models.yaml - SARIMA and HoltWinters with optimization
+    models_path = Path(temp_config_dir) / "models.yaml"
+    with open(models_path, "r") as f:
+        config = yaml.safe_load(f) or {}
+
+    config["sarima"] = {
+        "enabled": True,
+        "optimize_params": True,
+        "optuna_trials": 3,  # Minimal for testing
+        "defaults": {"order": [1, 1, 1], "seasonal_order": [1, 1, 1, 12]},
+        "feature_importance": {"enabled": False},
+    }
+    config["holt_winters"] = {
+        "enabled": True,
+        "defaults": {"trend": "add", "seasonal": "add", "seasonal_periods": 12},
+        "feature_importance": {"enabled": False},
+    }
+    config["chronos"] = {"enabled": False}
+    config["xgboost"] = {"enabled": False}
+    config["prophet"] = {"enabled": False}
+
+    with open(models_path, "w") as f:
+        yaml.dump(config, f)
+
+    # Update pipeline.yaml
+    pipeline_path = Path(temp_config_dir) / "pipeline.yaml"
+    config = {
+        "validation_months": 6,
+        "test_months": 6,
+        "forecast_horizon": 6,
+        "ensemble_mape_threshold": 0.5,
+        "ensemble_max_models": 3,
+    }
+    with open(pipeline_path, "w") as f:
+        yaml.dump(config, f)
+
+    return temp_config_dir
+
+
+@pytest.fixture(scope="function")
+def e2e_multivariate_demand_file(temp_output_dir):
+    """Create synthetic multivariate demand data for E2E tests."""
+    np.random.seed(42)
+    dates = pd.date_range(start="2020-01-01", periods=60, freq="MS")
+
+    products_data = {}
+
+    # Product with trend (affected by marketing)
+    trend = np.linspace(100, 180, len(dates))
+    noise = np.random.randn(len(dates)) * 8
+    products_data["MultiTrend"] = (trend + noise).clip(min=1)
+
+    # Product with seasonality (affected by price)
+    base = 140
+    seasonal = 35 * np.sin(2 * np.pi * np.arange(len(dates)) / 12)
+    noise = np.random.randn(len(dates)) * 6
+    products_data["MultiSeasonal"] = (base + seasonal + noise).clip(min=1)
+
+    # Build DataFrame
+    date_strings = [d.strftime("%m.%Y") for d in dates]
+    data_rows = [[""] + date_strings]
+
+    for product_name, values in products_data.items():
+        row = [product_name] + list(values)
+        data_rows.append(row)
+
+    df = pd.DataFrame(data_rows)
+    demand_file = Path(temp_output_dir) / "e2e_multivariate_demand.xlsx"
+    df.to_excel(demand_file, header=False, index=False)
+
+    return str(demand_file)
+
+
+@pytest.fixture(scope="function")
+def e2e_multivariate_feature_store(temp_output_dir):
+    """Create feature store for E2E multivariate tests."""
+    np.random.seed(42)
+    dates = pd.date_range(start="2020-01-01", periods=60, freq="MS")
+
+    data = {"Date": dates}
+    products = ["MultiTrend", "MultiSeasonal"]
+    promo_types = ["none", "discount", "bundle"]
+
+    for product in products:
+        base_price = 50 + np.random.randint(0, 20)
+        data[f"{product}_price"] = (base_price + np.random.randn(len(dates)) * 3).astype(float)
+        data[f"{product}_marketing"] = np.random.uniform(500, 2000, len(dates)).astype(float)
+        data[f"{product}_promo"] = list(np.random.choice(promo_types, len(dates)))
+
+    df = pd.DataFrame(data)
+    df.set_index("Date", inplace=True)
+
+    feature_file = Path(temp_output_dir) / "e2e_multivariate_features.xlsx"
+    df.to_excel(feature_file)
+
+    return str(feature_file)
+
+
+@pytest.fixture
+def e2e_multivariate_config(temp_config_dir, e2e_multivariate_demand_file, e2e_multivariate_feature_store):
+    """Create config for E2E multivariate test with feature importance."""
+    import yaml
+
+    # Update data_input.yaml
+    data_input_path = Path(temp_config_dir) / "data_input.yaml"
+    with open(data_input_path, "r") as f:
+        config = yaml.safe_load(f) or {}
+
+    config["excel_path"] = e2e_multivariate_demand_file
+    config["feature_store_path"] = e2e_multivariate_feature_store
+    config["categorical_features"] = ["promo"]
+
+    with open(data_input_path, "w") as f:
+        yaml.dump(config, f)
+
+    # Update models.yaml - XGBoost with feature importance
+    models_path = Path(temp_config_dir) / "models.yaml"
+    config = {
+        "sarima": {"enabled": False},
+        "holt_winters": {"enabled": False},
+        "chronos": {"enabled": False},
+        "xgboost": {
+            "enabled": True,
+            "optimize_params": True,
+            "optuna_trials": 3,
+            "defaults": {"n_estimators": 50, "max_depth": 4, "learning_rate": 0.1},
+            "feature_importance": {
+                "enabled": True,
+                "permutation": True,
+                "shap": False,  # Skip SHAP for faster tests
+            },
+        },
+        "prophet": {"enabled": False},
+    }
+    with open(models_path, "w") as f:
+        yaml.dump(config, f)
+
+    # Update pipeline.yaml
+    pipeline_path = Path(temp_config_dir) / "pipeline.yaml"
+    config = {
+        "validation_months": 6,
+        "test_months": 6,
+        "forecast_horizon": 6,
+        "ensemble_mape_threshold": 0.5,
+        "ensemble_max_models": 3,
+    }
+    with open(pipeline_path, "w") as f:
+        yaml.dump(config, f)
+
+    return temp_config_dir
+
+
+@pytest.fixture
+def e2e_feature_store_config(temp_config_dir, four_product_demand_file, four_product_feature_store):
+    """Create config for E2E test with feature store loading."""
+    import yaml
+
+    # Update data_input.yaml
+    data_input_path = Path(temp_config_dir) / "data_input.yaml"
+    with open(data_input_path, "r") as f:
+        config = yaml.safe_load(f) or {}
+
+    config["excel_path"] = four_product_demand_file
+    config["feature_store_path"] = four_product_feature_store
+    config["categorical_features"] = ["promo"]
+
+    with open(data_input_path, "w") as f:
+        yaml.dump(config, f)
+
+    # Update models.yaml - SARIMA and HoltWinters (univariate, no feature issues)
+    # XGBoost has issues with categorical string features in this test setup
+    models_path = Path(temp_config_dir) / "models.yaml"
+    config = {
+        "sarima": {
+            "enabled": True,
+            "optimize_params": False,  # Fast for testing
+            "defaults": {"order": [1, 1, 1], "seasonal_order": [1, 1, 1, 12]},
+            "feature_importance": {"enabled": False},
+        },
+        "holt_winters": {
+            "enabled": True,
+            "defaults": {"trend": "add", "seasonal": "add", "seasonal_periods": 12},
+            "feature_importance": {"enabled": False},
+        },
+        "chronos": {"enabled": False},
+        "xgboost": {"enabled": False},  # Disabled to avoid categorical encoding issues
+        "prophet": {"enabled": False},
+    }
+    with open(models_path, "w") as f:
+        yaml.dump(config, f)
+
+    # Update pipeline.yaml
+    pipeline_path = Path(temp_config_dir) / "pipeline.yaml"
+    config = {
+        "validation_months": 6,
+        "test_months": 6,
+        "forecast_horizon": 6,
+        "ensemble_mape_threshold": 0.5,
+        "ensemble_max_models": 3,
+    }
     with open(pipeline_path, "w") as f:
         yaml.dump(config, f)
 

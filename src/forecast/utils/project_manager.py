@@ -20,6 +20,7 @@ class ProjectManager:
         base_output_dir: str = "output",
         base_log_dir: str = "logs",
         timestamp: str | None = None,
+        pipeline_type: str = "default",
     ):
         """Initialize project manager.
 
@@ -28,8 +29,11 @@ class ProjectManager:
             base_output_dir: Base directory for outputs.
             base_log_dir: Base directory for logs.
             timestamp: Optional timestamp string. If None, generates new one.
+            pipeline_type: Type of pipeline (univariate, multivariate_single, multivariate_all).
+                Output dir becomes: output/{pipeline_type}/{project}/
         """
         self.project_name = project_name
+        self.pipeline_type = pipeline_type
         self.base_output_dir = Path(base_output_dir)
         self.base_log_dir = Path(base_log_dir)
         self._timestamp = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -41,7 +45,12 @@ class ProjectManager:
 
     @property
     def project_output_dir(self) -> Path:
-        """Get the project-specific output directory."""
+        """Get the project-specific output directory.
+
+        Structure: output/{pipeline_type}/{project_name}/
+        """
+        if self.pipeline_type and self.pipeline_type != "default":
+            return self.base_output_dir / self.pipeline_type / self.project_name
         return self.base_output_dir / self.project_name
 
     @property

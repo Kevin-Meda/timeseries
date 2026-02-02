@@ -42,6 +42,7 @@ class XGBoostForecaster(BaseForecaster):
         self,
         use_optuna: bool = True,
         optuna_trials: int = 100,
+        optuna_val_ratio: float = 0.2,
         n_estimators: int = 100,
         max_depth: int = 6,
         learning_rate: float = 0.1,
@@ -53,6 +54,8 @@ class XGBoostForecaster(BaseForecaster):
         Args:
             use_optuna: Whether to use Optuna for hyperparameter optimization.
             optuna_trials: Number of Optuna trials.
+            optuna_val_ratio: Ratio of data to use for internal validation during
+                Optuna optimization (default 0.2 = 80/20 split).
             n_estimators: Number of boosting rounds (default if not tuning).
             max_depth: Maximum tree depth (default if not tuning).
             learning_rate: Learning rate (default if not tuning).
@@ -65,6 +68,7 @@ class XGBoostForecaster(BaseForecaster):
 
         self.use_optuna = use_optuna
         self.optuna_trials = optuna_trials
+        self.optuna_val_ratio = optuna_val_ratio
         self.n_estimators = n_estimators
         self.max_depth = max_depth
         self.learning_rate = learning_rate
@@ -115,6 +119,11 @@ class XGBoostForecaster(BaseForecaster):
     ) -> None:
         """Fit XGBoost model.
 
+        When use_optuna=True:
+        - Combines train+val data
+        - Uses internal CV split (optuna_val_ratio) for optimization
+        - Test set is never seen during optimization
+
         Args:
             train: Training data (Series or DataFrame with 'demand' column).
             val: Optional validation data for early stopping/tuning.
@@ -149,14 +158,8 @@ class XGBoostForecaster(BaseForecaster):
                     f"({', '.join(exog_cols)})"
                 )
 
-        # Store original data for prediction
-        self._train_data = train_df.copy()
-
-        # Prepare features
-        train_features = self._prepare_features(train_df, is_training=True)
-
-        # Handle validation data
-        val_features = None
+        # Handle validation data - combine with train when optimizing
+        combined_df = train_df.copy()
         if val is not None:
             if isinstance(val, pd.Series):
                 val_df = pd.DataFrame({self._target_col: val})
@@ -170,16 +173,16 @@ class XGBoostForecaster(BaseForecaster):
                     if col not in val_df.columns:
                         val_df[col] = exog_val[col]
 
-            # Concatenate train and val for feature generation (to get proper lags)
-            full_df = pd.concat([train_df, val_df])
-            full_features = self._prepare_features(full_df, is_training=True)
+            combined_df = pd.concat([train_df, val_df])
 
-            # Split back into train and val
-            val_start_idx = len(train_features)
-            val_features = full_features.iloc[val_start_idx:]
+        # Store combined data for prediction
+        self._train_data = combined_df.copy()
+
+        # Prepare features on combined data
+        all_features = self._prepare_features(combined_df, is_training=True)
 
         # Get feature columns (exclude target)
-        self._feature_columns = get_feature_columns(train_features, self._target_col)
+        self._feature_columns = get_feature_columns(all_features, self._target_col)
 
         # Log total feature count
         logger.info(
@@ -187,20 +190,14 @@ class XGBoostForecaster(BaseForecaster):
             f"(temporal + exogenous combined)"
         )
 
-        X_train = train_features[self._feature_columns]
-        y_train = train_features[self._target_col]
+        X_all = all_features[self._feature_columns]
+        y_all = all_features[self._target_col]
 
-        X_val = None
-        y_val = None
-        if val_features is not None and len(val_features) > 0:
-            X_val = val_features[self._feature_columns]
-            y_val = val_features[self._target_col]
-
-        # Hyperparameter optimization or direct fitting
-        if self.use_optuna and val_features is not None:
-            self._optimize_with_optuna(X_train, y_train, X_val, y_val)
+        # Hyperparameter optimization with internal CV
+        if self.use_optuna:
+            self._optimize_with_optuna(X_all, y_all)
         else:
-            self._fit_model(X_train, y_train, X_val, y_val)
+            self._fit_model(X_all, y_all, None, None)
 
         self._is_fitted = True
         logger.info(
@@ -247,18 +244,17 @@ class XGBoostForecaster(BaseForecaster):
 
     def _optimize_with_optuna(
         self,
-        X_train: pd.DataFrame,
-        y_train: pd.Series,
-        X_val: pd.DataFrame,
-        y_val: pd.Series,
+        X: pd.DataFrame,
+        y: pd.Series,
     ) -> None:
-        """Optimize hyperparameters using Optuna.
+        """Optimize hyperparameters using Optuna with internal CV.
+
+        Uses internal train/val split based on optuna_val_ratio.
+        This ensures the test set is never seen during optimization.
 
         Args:
-            X_train: Training features.
-            y_train: Training targets.
-            X_val: Validation features.
-            y_val: Validation targets.
+            X: All features (combined train+val).
+            y: All targets (combined train+val).
         """
         logger = get_logger()
 
@@ -268,8 +264,20 @@ class XGBoostForecaster(BaseForecaster):
             optuna.logging.set_verbosity(optuna.logging.WARNING)
         except ImportError:
             logger.warning("Optuna not available, using default parameters")
-            self._fit_model(X_train, y_train, X_val, y_val)
+            self._fit_model(X, y, None, None)
             return
+
+        # Internal CV split
+        split_idx = int(len(X) * (1 - self.optuna_val_ratio))
+        X_train = X.iloc[:split_idx]
+        y_train = y.iloc[:split_idx]
+        X_val = X.iloc[split_idx:]
+        y_val = y.iloc[split_idx:]
+
+        logger.debug(
+            f"XGBoost Optuna internal split: train={len(X_train)}, "
+            f"val={len(X_val)} (ratio={self.optuna_val_ratio})"
+        )
 
         def objective(trial):
             params = {
@@ -307,7 +315,7 @@ class XGBoostForecaster(BaseForecaster):
         self.learning_rate = best["learning_rate"]
         self._optuna_trials_used = len(study.trials)
 
-        # Fit final model with best params
+        # Fit final model on ALL data with best params
         self.model = xgb.XGBRegressor(
             n_estimators=best["n_estimators"],
             max_depth=best["max_depth"],
@@ -321,7 +329,7 @@ class XGBoostForecaster(BaseForecaster):
             random_state=42,
             n_jobs=-1,
         )
-        self.model.fit(X_train, y_train, verbose=False)
+        self.model.fit(X, y, verbose=False)
 
         logger.info(f"XGBoost Optuna optimization complete: {best}")
 
@@ -416,6 +424,7 @@ class XGBoostForecaster(BaseForecaster):
             "rolling_windows": self.rolling_windows,
             "use_optuna": self.use_optuna,
             "optuna_trials": self.optuna_trials,
+            "optuna_val_ratio": self.optuna_val_ratio,
             "feature_columns": self._feature_columns,
             "optuna_trials_used": self._optuna_trials_used,
         }
@@ -429,6 +438,7 @@ class XGBoostForecaster(BaseForecaster):
         self.rolling_windows = params.get("rolling_windows", self.rolling_windows)
         self.use_optuna = params.get("use_optuna", self.use_optuna)
         self.optuna_trials = params.get("optuna_trials", self.optuna_trials)
+        self.optuna_val_ratio = params.get("optuna_val_ratio", self.optuna_val_ratio)
         self._feature_columns = params.get("feature_columns", [])
         self._optuna_trials_used = params.get("optuna_trials_used", 0)
 

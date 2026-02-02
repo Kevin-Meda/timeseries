@@ -36,6 +36,7 @@ class ProphetForecaster(BaseForecaster):
         self,
         use_optuna: bool = True,
         optuna_trials: int = 50,
+        optuna_val_ratio: float = 0.2,
         changepoint_prior_scale: float = 0.05,
         seasonality_prior_scale: float = 10.0,
         seasonality_mode: str = "additive",
@@ -45,6 +46,8 @@ class ProphetForecaster(BaseForecaster):
         Args:
             use_optuna: Whether to use Optuna for hyperparameter optimization.
             optuna_trials: Number of Optuna trials.
+            optuna_val_ratio: Ratio of data to use for internal validation during
+                Optuna optimization (default 0.2 = 80/20 split).
             changepoint_prior_scale: Flexibility of trend changes.
             seasonality_prior_scale: Flexibility of seasonality.
             seasonality_mode: "additive" or "multiplicative".
@@ -55,6 +58,7 @@ class ProphetForecaster(BaseForecaster):
 
         self.use_optuna = use_optuna
         self.optuna_trials = optuna_trials
+        self.optuna_val_ratio = optuna_val_ratio
         self.changepoint_prior_scale = changepoint_prior_scale
         self.seasonality_prior_scale = seasonality_prior_scale
         self.seasonality_mode = seasonality_mode
@@ -100,6 +104,11 @@ class ProphetForecaster(BaseForecaster):
     ) -> None:
         """Fit Prophet model.
 
+        When use_optuna=True:
+        - Combines train+val data
+        - Uses internal CV split (optuna_val_ratio) for optimization
+        - Test set is never seen during optimization
+
         Args:
             train: Training data (Series or DataFrame with 'demand' column).
             val: Optional validation data for tuning.
@@ -127,29 +136,8 @@ class ProphetForecaster(BaseForecaster):
                 if col not in train_df.columns and col != self._target_col:
                     train_df[col] = exog_train[col]
 
-        # Store regressor columns (all columns except target)
-        self._regressor_columns = [
-            col for col in train_df.columns if col != self._target_col
-        ]
-
-        # Log regressor info
-        if self._regressor_columns:
-            logger.info(
-                f"Prophet regressors: {len(self._regressor_columns)} regressors "
-                f"({', '.join(self._regressor_columns)})"
-            )
-
-        # Store last known regressor values for extrapolation
-        if self._regressor_columns:
-            self._last_regressor_values = {
-                col: train_df[col].iloc[-1] for col in self._regressor_columns
-            }
-
-        # Store original data
-        self._train_data = train_df.copy()
-
-        # Handle validation data
-        val_df = None
+        # Handle validation data - combine with train when optimizing
+        combined_df = train_df.copy()
         if val is not None:
             if isinstance(val, pd.Series):
                 val_df = pd.DataFrame({self._target_col: val})
@@ -163,19 +151,34 @@ class ProphetForecaster(BaseForecaster):
                     if col not in val_df.columns and col != self._target_col:
                         val_df[col] = exog_val[col]
 
-            # Update last regressor values
-            if self._regressor_columns:
-                self._last_regressor_values = {
-                    col: val_df[col].iloc[-1]
-                    for col in self._regressor_columns
-                    if col in val_df.columns
-                }
+            combined_df = pd.concat([train_df, val_df])
 
-        # Hyperparameter optimization or direct fitting
-        if self.use_optuna and val_df is not None:
-            self._optimize_with_optuna(train_df, val_df)
+        # Store regressor columns (all columns except target)
+        self._regressor_columns = [
+            col for col in combined_df.columns if col != self._target_col
+        ]
+
+        # Log regressor info
+        if self._regressor_columns:
+            logger.info(
+                f"Prophet regressors: {len(self._regressor_columns)} regressors "
+                f"({', '.join(self._regressor_columns)})"
+            )
+
+        # Store last known regressor values for extrapolation
+        if self._regressor_columns:
+            self._last_regressor_values = {
+                col: combined_df[col].iloc[-1] for col in self._regressor_columns
+            }
+
+        # Store combined data
+        self._train_data = combined_df.copy()
+
+        # Hyperparameter optimization with internal CV or direct fitting
+        if self.use_optuna:
+            self._optimize_with_optuna(combined_df)
         else:
-            self._fit_model(train_df)
+            self._fit_model(combined_df)
 
         self._is_fitted = True
         logger.info(
@@ -211,14 +214,15 @@ class ProphetForecaster(BaseForecaster):
 
     def _optimize_with_optuna(
         self,
-        train_df: pd.DataFrame,
-        val_df: pd.DataFrame,
+        data_df: pd.DataFrame,
     ) -> None:
-        """Optimize hyperparameters using Optuna.
+        """Optimize hyperparameters using Optuna with internal CV.
+
+        Uses internal train/val split based on optuna_val_ratio.
+        This ensures the test set is never seen during optimization.
 
         Args:
-            train_df: Training DataFrame.
-            val_df: Validation DataFrame.
+            data_df: Combined data for optimization (train+val when available).
         """
         logger = get_logger()
 
@@ -228,8 +232,18 @@ class ProphetForecaster(BaseForecaster):
             optuna.logging.set_verbosity(optuna.logging.WARNING)
         except ImportError:
             logger.warning("Optuna not available, using default parameters")
-            self._fit_model(train_df)
+            self._fit_model(data_df)
             return
+
+        # Internal CV split
+        split_idx = int(len(data_df) * (1 - self.optuna_val_ratio))
+        internal_train = data_df.iloc[:split_idx]
+        internal_val = data_df.iloc[split_idx:]
+
+        logger.debug(
+            f"Prophet Optuna internal split: train={len(internal_train)}, "
+            f"val={len(internal_val)} (ratio={self.optuna_val_ratio})"
+        )
 
         def objective(trial):
             params = {
@@ -244,7 +258,7 @@ class ProphetForecaster(BaseForecaster):
                 ),
             }
 
-            prophet_train = self._prepare_prophet_df(train_df)
+            prophet_train = self._prepare_prophet_df(internal_train)
 
             model = Prophet(
                 changepoint_prior_scale=params["changepoint_prior_scale"],
@@ -264,12 +278,13 @@ class ProphetForecaster(BaseForecaster):
                 model.fit(prophet_train)
 
             # Prepare validation data for prediction
-            prophet_val = self._prepare_prophet_df(val_df, include_regressors=True)
-            future = prophet_val[["ds"] + self._regressor_columns].copy()
+            prophet_val = self._prepare_prophet_df(internal_val, include_regressors=True)
+            regressor_cols = [c for c in self._regressor_columns if c in prophet_val.columns]
+            future = prophet_val[["ds"] + regressor_cols].copy()
 
             forecast = model.predict(future)
             predictions = forecast["yhat"].values
-            actuals = val_df[self._target_col].values
+            actuals = internal_val[self._target_col].values
 
             mape = np.mean(np.abs((actuals - predictions) / (actuals + 1e-8)))
             return mape
@@ -283,8 +298,8 @@ class ProphetForecaster(BaseForecaster):
         self.seasonality_mode = best["seasonality_mode"]
         self._optuna_trials_used = len(study.trials)
 
-        # Fit final model with best params
-        self._fit_model(train_df)
+        # Fit final model on ALL data with best params
+        self._fit_model(data_df)
 
         logger.info(f"Prophet Optuna optimization complete: {best}")
 
@@ -370,6 +385,7 @@ class ProphetForecaster(BaseForecaster):
             "seasonality_mode": self.seasonality_mode,
             "use_optuna": self.use_optuna,
             "optuna_trials": self.optuna_trials,
+            "optuna_val_ratio": self.optuna_val_ratio,
             "regressor_columns": self._regressor_columns,
             "last_regressor_values": self._last_regressor_values,
             "optuna_trials_used": self._optuna_trials_used,
@@ -386,6 +402,7 @@ class ProphetForecaster(BaseForecaster):
         self.seasonality_mode = params.get("seasonality_mode", self.seasonality_mode)
         self.use_optuna = params.get("use_optuna", self.use_optuna)
         self.optuna_trials = params.get("optuna_trials", self.optuna_trials)
+        self.optuna_val_ratio = params.get("optuna_val_ratio", self.optuna_val_ratio)
         self._regressor_columns = params.get("regressor_columns", [])
         self._last_regressor_values = params.get("last_regressor_values", {})
         self._optuna_trials_used = params.get("optuna_trials_used", 0)

@@ -5,6 +5,7 @@ forecast_horizon: 12
 
 # Ensemble settings
 ensemble_mape_threshold: 0.5
+ensemble_max_models: 3
 
 # Product mode: "per_product" (train separate model per product)
 #               "multi_product" (train single model across products)

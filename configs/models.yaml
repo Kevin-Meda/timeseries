@@ -1,10 +1,11 @@
 sarima:
   enabled: true
-  optimize_params: false      # Per-model flag: true=run Optuna, false=use saved/defaults
-  optuna_trials: 50
+  optimize_params: true      # Per-model flag: true=run Optuna, false=use saved/defaults
+  optuna_trials: 5
   defaults:
     order: [1, 1, 1]
     seasonal_order: [1, 1, 1, 12]
+  # No feature_importance for univariate models
 
 holt_winters:
   enabled: true
@@ -13,27 +14,40 @@ holt_winters:
     trend: "add"
     seasonal: "add"
     seasonal_periods: 12
+  # No feature_importance for univariate models
 
 chronos:
   enabled: true
   # No optimize_params - pre-trained model
   defaults:
-    model_name: "amazon/chronos-t5-small"
+    model_name: "amazon/chronos-2"
+  feature_importance:
+    enabled: true
+    permutation: true
+    shap: false              # Chronos may not support SHAP
 
 xgboost:
   enabled: true
   optimize_params: true       # Per-model flag
-  optuna_trials: 100
+  optuna_trials: 5
   defaults:
     n_estimators: 100
     max_depth: 6
     learning_rate: 0.1
+  feature_importance:
+    enabled: true
+    permutation: true
+    shap: true               # TreeSHAP for tree-based models
 
 prophet:
   enabled: true
   optimize_params: true       # Per-model flag
-  optuna_trials: 50
+  optuna_trials: 5
   defaults:
     changepoint_prior_scale: 0.05
     seasonality_prior_scale: 10.0
     seasonality_mode: "additive"
+  feature_importance:
+    enabled: true
+    permutation: true
+    shap: true               # KernelSHAP for non-tree models
